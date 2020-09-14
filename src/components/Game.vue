@@ -90,7 +90,7 @@ export default {
       const key = snapshot.key
       if (key === this.myPlayerId) return
 
-      this.players[key].parent.removeChild(this.players[key])
+      this.players[key].sprite.parent.removeChild(this.players[key].sprite)
       delete this.players[key]
     })
 
@@ -104,6 +104,10 @@ export default {
           this.myPlayer.sprite.texture = bunnyDedTexture
         }
         return
+      }
+
+      if (snapshotVal.dead) {
+        this.players[key].sprite.texture = bunnyDedTexture
       }
 
       this.players[key].sprite.dest.x = snapshotVal.x
