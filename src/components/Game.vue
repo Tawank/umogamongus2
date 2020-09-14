@@ -7,181 +7,155 @@ import * as PIXI from 'pixi.js'
 
 import firebase from 'firebase/app'
 import 'firebase/database'
-
-import keyboard from '@/utils/keyboard'
+import Player from '@/classes/player'
+import smooth from '@/utils/smooth'
 
 export default {
   name: 'Game',
   data () {
     return {
       players: {},
-      playerId: null,
+      myPlayer: null,
+      myPlayerId: null,
+      myPlayerDb: null,
+      myPlayerAlive: true,
       throttle: 0,
-      ticker: null,
-      bunnyTexture: null,
-      bunnyDedTexture: null
+      ticker: null
     }
   },
   mounted () {
-    this.bunnyTexture = PIXI.Texture.from('assets/bunny.png')
-    this.bunnyDedTexture = PIXI.Texture.from('assets/bunnyded.png')
+    const bunnyDedTexture = PIXI.Texture.from('assets/bunnyded.png')
+
+    let myPlayerName = localStorage.getItem('name')
+    if (!myPlayerName) {
+      myPlayerName = prompt('Enter Name')
+      localStorage.setItem('name', myPlayerName)
+    }
+
     const app = new PIXI.Application({
       width: 800, height: 600, backgroundColor: 0x1099bb, resolution: window.devicePixelRatio || 1
     })
+    const defaultIcon = "url('assets/knife.png'),auto"
+    const hoverIcon = "url('assets/knife_hover.png'),auto"
+
+    app.renderer.plugins.interaction.cursorStyles.default = defaultIcon
+    app.renderer.plugins.interaction.cursorStyles.hover = hoverIcon
+
     document.querySelector('.game-containter').appendChild(app.view)
 
-    this.playerId = Math.random().toString(36).substring(2, 15)
+    this.myPlayerId = Math.random().toString(36).substring(2, 15)
 
-    const bunny = this.createBunny()
+    this.myPlayer = new Player(true, 80, 80, myPlayerName)
     const tintColor = Math.random() * 0xFFFFFF
-    bunny.tint = tintColor
-    this.players[this.playerId] = bunny
-    app.stage.addChild(bunny)
+    this.myPlayer.sprite.tint = tintColor
+    app.stage.addChild(this.myPlayer.sprite)
 
-    const thisPlayerDb = firebase.database().ref('users/' + this.playerId)
-    thisPlayerDb.onDisconnect().set(null)
-    thisPlayerDb.set({
-      x: bunny.x,
-      y: bunny.y,
-      tint: tintColor
+    this.myPlayerDb = firebase.database().ref('users/' + this.myPlayerId)
+    this.myPlayerDb.onDisconnect().set(null)
+    this.myPlayerDb.set({
+      x: this.myPlayer.sprite.x,
+      y: this.myPlayer.sprite.y,
+      tint: tintColor,
+      name: myPlayerName
     })
 
     this.ticker = app.ticker
-    this.ticker.add((delta) => {
-      for (const [key, player] of Object.entries(this.players)) {
-        if (key === this.playerId) {
-          player.x += player.vx
-          player.y += player.vy
-          const object = {
-            x: player.x,
-            y: player.y,
-            tint: tintColor
-          }
-
-          if (Math.abs(player.vx) + Math.abs(player.vy)) {
-            if (this.throttle === 0) {
-              thisPlayerDb.set(object)
-            }
-            this.throttle += delta
-            if (Object.keys(this.players).length === 1) {
-              if (this.throttle > 10) {
-                this.throttle = 0
-              }
-            } else {
-              if (this.throttle > 5) {
-                this.throttle = 0
-              }
-            }
-          }
-        } else {
-          if (Math.abs(player.x - player.dest.x) > 2) {
-            player.x = this.smooth(player.x, player.dest.x, 0.2)
-          }
-          if (Math.abs(player.y - player.dest.y) > 2) {
-            player.y = this.smooth(player.y, player.dest.y, 0.2)
-          }
-        }
-      }
-    })
+    this.ticker.add(this.gameLoop)
 
     firebase.database().ref('users/').on('child_added', (snapshot) => {
       const key = snapshot.key
-      if (key === this.playerId) return
+      if (key === this.myPlayerId) return
 
       const snapshotVal = snapshot.val()
-      const player = this.createBunny()
+      const player = new Player(false, snapshotVal.x, snapshotVal.y, snapshotVal.name)
       this.$set(this.players, key, player)
-      player.dest.x = snapshotVal.x
-      player.dest.y = snapshotVal.y
-      player.tint = snapshotVal.tint
+      player.sprite.dest.x = snapshotVal.x
+      player.sprite.dest.y = snapshotVal.y
+      player.sprite.tint = snapshotVal.tint
 
-      player.interactive = true
-      player.buttonMode = true
-      player.on('pointerdown', () => {
-        player.texture = this.bunnyDedTexture
+      player.sprite.interactive = true
+      player.sprite.buttonMode = true
+      player.sprite.cursor = 'hover'
+      player.sprite.on('pointerdown', () => {
+        if (this.myPlayerAlive) {
+          firebase.database().ref('users/' + key + '/dead').set(true)
+          player.dead()
+        }
       })
 
-      app.stage.addChild(player)
+      app.stage.addChild(player.sprite)
     })
 
     firebase.database().ref('users/').on('child_removed', (snapshot) => {
       const key = snapshot.key
+      if (key === this.myPlayerId) return
+
       this.players[key].parent.removeChild(this.players[key])
       delete this.players[key]
     })
 
     firebase.database().ref('users/').on('child_changed', (snapshot) => {
       const key = snapshot.key
-      if (key === this.player) return
-
       const snapshotVal = snapshot.val()
 
-      this.players[key].dest.x = snapshotVal.x
-      this.players[key].dest.y = snapshotVal.y
+      if (key === this.myPlayerId) {
+        if (snapshotVal.dead && this.myPlayerAlive) {
+          this.myPlayerAlive = false
+          this.myPlayer.sprite.texture = bunnyDedTexture
+        }
+        return
+      }
+
+      this.players[key].sprite.dest.x = snapshotVal.x
+      this.players[key].sprite.dest.y = snapshotVal.y
     })
   },
   beforeDestroy () {
     this.ticker.stop()
     this.ticker.destroy()
+    firebase.database().ref('users/').off()
   },
   methods: {
-    createBunny () {
-      const texture = this.bunnyTexture
+    gameLoop (delta) {
+      const myPlayerSprite = this.myPlayer.sprite
 
-      const bunny = new PIXI.Sprite(texture)
-      bunny.x = 96
-      bunny.y = 96
-      bunny.dest = {}
-      bunny.dest.x = bunny.x
-      bunny.dest.y = bunny.y
-      bunny.vx = 0
-      bunny.vy = 0
-
-      const up = keyboard('w')
-      const right = keyboard('d')
-      const down = keyboard('s')
-      const left = keyboard('a')
-
-      left.press = () => {
-        bunny.vx = -5
+      if (this.myPlayerAlive) {
+        myPlayerSprite.x += myPlayerSprite.vx * delta
+        myPlayerSprite.y += myPlayerSprite.vy * delta
       }
 
-      left.release = () => {
-        if (!right.isDown) {
-          bunny.vx = 0
+      const object = {
+        x: myPlayerSprite.x,
+        y: myPlayerSprite.y
+      }
+
+      if (Math.abs(myPlayerSprite.vx) + Math.abs(myPlayerSprite.vy)) {
+        if (this.throttle === 0) {
+          this.myPlayerDb.update(object)
+        }
+        this.throttle += delta
+        if (Object.keys(this.players).length === 1) {
+          if (this.throttle > 10) {
+            this.throttle = 0
+          }
+        } else {
+          if (this.throttle > 5) {
+            this.throttle = 0
+          }
         }
       }
 
-      up.press = () => {
-        bunny.vy = -5
-      }
-      up.release = () => {
-        if (!down.isDown) {
-          bunny.vy = 0
+      for (const [key, player] of Object.entries(this.players)) {
+        if (key === this.playerId) {
+        } else {
+          if (Math.abs(player.sprite.x - player.sprite.dest.x) > 2) {
+            player.sprite.x = smooth(player.sprite.x, player.sprite.dest.x, 0.2)
+          }
+          if (Math.abs(player.sprite.y - player.sprite.dest.y) > 2) {
+            player.sprite.y = smooth(player.sprite.y, player.sprite.dest.y, 0.2)
+          }
         }
       }
-
-      right.press = () => {
-        bunny.vx = 5
-      }
-      right.release = () => {
-        if (!left.isDown) {
-          bunny.vx = 0
-        }
-      }
-
-      down.press = () => {
-        bunny.vy = 5
-      }
-      down.release = () => {
-        if (!up.isDown) {
-          bunny.vy = 0
-        }
-      }
-      return bunny
-    },
-    smooth (start, end, amt) {
-      return (1 - amt) * start + amt * end
     }
   }
 }
